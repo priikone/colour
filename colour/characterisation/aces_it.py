@@ -17,6 +17,7 @@ Defines the *Academy Color Encoding System* (ACES) *Input Transform* utilities:
 -   :func:`colour.characterisation.optimisation_factory_rawtoaces_v1`
 -   :func:`colour.characterisation.optimisation_factory_JzAzBz`
 -   :func:`colour.matrix_idt`
+-   :func:`colour.camera_RGB_matrix_idt`
 -   :func:`colour.camera_RGB_to_ACES2065_1`
 
 References
@@ -84,7 +85,7 @@ __all__ = [
     'white_balance_multipliers', 'best_illuminant', 'normalise_illuminant',
     'training_data_sds_to_RGB', 'training_data_sds_to_XYZ',
     'optimisation_factory_rawtoaces_v1', 'optimisation_factory_JzAzBz',
-    'matrix_idt'
+    'matrix_idt', 'camera_RGB_to_matrix_idt'
 ]
 
 FLARE_PERCENTAGE = 0.00500
@@ -854,6 +855,110 @@ def matrix_idt(sensitivities,
         return M, RGB_w, XYZ, RGB
     else:
         return M, RGB_w
+
+
+def camera_RGB_to_matrix_idt(RGB,
+                             illuminant,
+                             training_data=None,
+                             cmfs=MSDS_CMFS['CIE 1931 2 Degree Standard Observer'].copy()
+                             .align(SPECTRAL_SHAPE_RAWTOACES),
+                             optimisation_factory=optimisation_factory_rawtoaces_v1,
+                             optimisation_kwargs=None,
+                             chromatic_adaptation_transform='CAT02',
+                             additional_data=False):
+    """
+    Computes an *Input Device Transform* (IDT) matrix for given camera *RGB*
+    colour target tristimulus values, illuminant, training data, standard observer
+    colour matching functions and optimization settings according to *RAW to
+    ACES* v1 and *P-2013-001* procedures.
+
+    Parameters
+    ----------
+    RGB : ndarray
+        Camera *RGB* colour target tristimulus values
+    illuminant : SpectralDistribution
+        Illuminant spectral distribution.
+    training_data : MultiSpectralDistributions, optional
+        Training data multi-spectral distributions, defaults to using the
+        *RAW to ACES* v1 190 patches.
+    cmfs : XYZ_ColourMatchingFunctions
+        Standard observer colour matching functions.
+    optimisation_factory : callable, optional
+        Callable producing the objective function and the *CIE XYZ* to
+        optimisation colour model function.
+    optimisation_kwargs : dict_like, optional
+        Parameters for :func:`scipy.optimize.minimize` definition.
+    chromatic_adaptation_transform : unicode, optional
+        **{'CAT02', 'XYZ Scaling', 'Von Kries', 'Bradford', 'Sharp',
+        'Fairchild', 'CMCCAT97', 'CMCCAT2000', 'CAT02 Brill 2008',
+        'Bianco 2010', 'Bianco PC 2010', None}**,
+        *Chromatic adaptation* transform, if *None* no chromatic adaptation is
+        performed.
+    additional_data : bool, optional
+        If *True*, the *XYZ* tristimulus values are returned.
+
+    Returns
+    -------
+    ndarray or tuple
+        *Input Device Transform* (IDT) matrix or tuple of
+        *Input Device Transform* (IDT) matrix, *XYZ* tristimulus values.
+
+    References
+    ----------
+    :cite:`Dyer2017`, :cite:`TheAcademyofMotionPictureArtsandSciences2015c`
+
+    Examples
+    --------
+    Computing the *Input Device Transform* (IDT) matrix for a camera
+    with white balanced camera RGB values for a ColorChecker 24 target.
+
+    >>> image = colour.cctf_decoding(colour.io.read_image("cc24.png"));
+    >>> RGB = detect_colour_checkers_segmentation(image);
+    >>> illuminant = SDS_ILLUMINANTS['D55']
+    >>> training_data = sds_and_msds_to_msds(
+            SDS_COLOURCHECKERS['cc_ohta'].values())
+    >>> M = camera_RGB_matrix_idt(RGB, illuminant,
+                                  training_data=training_data))
+    >>> np.around(M, 3)
+    array([[ 0.85 , -0.016,  0.151],
+           [ 0.051,  1.126, -0.185],
+           [ 0.02 , -0.194,  1.162]])
+    """
+
+    if training_data is None:
+        training_data = read_training_data_rawtoaces_v1()
+
+    shape = cmfs.shape
+    if illuminant.shape != shape:
+        runtime_warning('Aligning "{0}" illuminant shape to "{1}".'.format(
+            illuminant.name, shape))
+        illuminant = illuminant.copy().align(shape)
+
+    if training_data.shape != shape:
+        runtime_warning('Aligning "{0}" training data shape to "{1}".'.format(
+            training_data.name, shape))
+        training_data = training_data.copy().align(shape)
+
+    XYZ = training_data_sds_to_XYZ(training_data, cmfs, illuminant,
+                                   chromatic_adaptation_transform)
+
+    objective_function, XYZ_to_optimization_colour_model = (
+        optimisation_factory())
+    optimisation_settings = {
+        'method': 'BFGS',
+        'jac': '2-point',
+    }
+    if optimisation_kwargs is not None:
+        optimisation_settings.update(optimisation_kwargs)
+
+    M = minimize(objective_function, np.ravel(np.identity(3)),
+                 (RGB, XYZ_to_optimization_colour_model(XYZ)),
+                 **optimisation_settings).x.reshape([3, 3])
+
+    if additional_data:
+        return M, XYZ
+    else:
+        return M
 
 
 def camera_RGB_to_ACES2065_1(RGB, B, b, k=1, clip=False):
